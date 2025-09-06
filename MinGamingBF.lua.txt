@@ -1,4 +1,4 @@
--- discord.gg/25ms
+
 
 
 shared.LoaderTitle = "Đăng Ký Kênh Min Gaming";
@@ -313,10 +313,10 @@ v5:Destroy();
 -- end);
 local v14 = loadstring(game:HttpGet("https://raw.githubusercontent.com/obfalchx/testfluent/refs/heads/main/FluentTrau"))();
 local v15 = v14:CreateWindow({
-    Title = "Min Gaming",
-    SubTitle = "",
+    Title = "Night Mystic",
+    SubTitle = "By Mauro",
     TabWidth = 160,
-    Theme = "Light",
+    Theme = "Darker",
     Acrylic = false,
     Size = UDim2.fromOffset(500, 320),
     MinimizeKey = Enum.KeyCode.End
@@ -9324,7 +9324,7 @@ spawn(function()
     end
 end);
 v14:Notify({
-    Title = "Min Gaming",
+    Title = "Night Mystic",
     Content = "Tải Xong",
     Duration = 10
 });
