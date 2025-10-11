@@ -1,0 +1,503 @@
+-- FluentPlus Follow Script (corrigido, sem 2 buttons e sem slider Attack Delay)
+-- Cole no executor e execute.
+
+-- ====== LIBS ======
+local Fluent = loadstring(game:HttpGet("https://raw.githubusercontent.com/discoart/FluentPlus/refs/heads/main/Beta.lua"))()
+local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/SaveManager.lua"))()
+local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
+
+-- ====== SERVICES & VARS ======
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+local task = task
+
+-- Follow settings
+local FOLLOW_HEIGHT = 15
+local NEAREST_RADIUS = 150
+local ARRIVE_TIME = 0.35
+local LERP_ALPHA = 0.36
+local DROPDOWN_UPDATE_DELAY = 1
+
+-- Auto Attack Settings
+local AUTO_ATTACK_ACTIVE = false
+local ATTACK_DELAY = 0.05 -- Delay padrão para o ataque (FIXO)
+
+if not LocalPlayer then
+    warn("LocalPlayer não encontrado.")
+    return
+end
+
+-- ====== HELPERS (Manter as existentes) ======
+local function getCharacter(player)
+    if not player then return nil end
+    local char = player.Character
+    if not char then return nil end
+    local hrp = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso")
+    if not hrp then return nil end
+    return char, hrp
+end
+
+local function setNoclipForCharacter(char, toggle)
+    if not char then return end
+    for _, part in ipairs(char:GetChildren()) do
+        if part:IsA("BasePart") then
+            part.CanCollide = not toggle and true or false
+        end
+    end
+end
+
+local function setAnchorHRP(char, anchor)
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso")
+    if hrp and hrp:IsA("BasePart") then
+        hrp.Anchored = anchor and true or false
+    end
+end
+
+local function safeGetHRP(player)
+    if not player or not player.Character then return nil end
+    return player.Character:FindFirstChild("HumanoidRootPart")
+end
+
+local function findNearestPlayerWithinRadius(radius)
+    radius = tonumber(radius) or NEAREST_RADIUS
+    local _, myHrp = getCharacter(LocalPlayer)
+    if not myHrp then return nil end
+
+    local nearest, nearestDist = nil, math.huge
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+            local hrp = p.Character.HumanoidRootPart
+            local dist = (hrp.Position - myHrp.Position).Magnitude
+            if dist < nearestDist and dist <= radius then
+                nearest = p
+                nearestDist = dist
+            end
+        end
+    end
+    return nearest
+end
+
+-- ====== FOLLOW CONTROLLER (Manter) ======
+local Following = {
+    active = false,
+    mode = nil,
+    targetPlayer = nil,
+    connection = nil,
+    stopRequested = false
+}
+
+local function stopFollowing()
+    Following.stopRequested = true
+    Following.active = false
+    Following.mode = nil
+    Following.targetPlayer = nil
+    if Following.connection then
+        Following.connection:Disconnect()
+        Following.connection = nil
+    end
+    local c = LocalPlayer.Character
+    if c then
+        setNoclipForCharacter(c, false)
+        setAnchorHRP(c, false)
+    end
+    -- Nota: Não reseta os toggles aqui. Isso é feito por quem chama stopFollowing
+end
+
+local function followLoop(targetPlayer)
+    if Following.connection then
+        Following.connection:Disconnect()
+        Following.connection = nil
+    end
+
+    Following.stopRequested = false
+    Following.active = true
+    Following.targetPlayer = targetPlayer
+
+    local myChar = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    local myHrp = myChar:WaitForChild("HumanoidRootPart")
+
+    setNoclipForCharacter(myChar, true)
+    setAnchorHRP(myChar, true)
+
+    Following.connection = RunService.Heartbeat:Connect(function(delta)
+        if Following.stopRequested then
+            if Following.connection then
+                Following.connection:Disconnect()
+                Following.connection = nil
+            end
+            setNoclipForCharacter(LocalPlayer.Character, false)
+            setAnchorHRP(LocalPlayer.Character, false)
+            Following.active = false
+            Following.targetPlayer = nil
+            return
+        end
+
+        if not targetPlayer or not targetPlayer.Parent then
+            stopFollowing()
+            -- Tenta desativar o toggle na UI se a perda do alvo ocorreu durante o follow
+            pcall(function()
+                if Fluent.Options.FollowNearest and Following.mode == "nearest" then
+                    Fluent.Options.FollowNearest:SetValue(false)
+                end
+                if Fluent.Options.FollowSelected and Following.mode == "selected" then
+                    Fluent.Options.FollowSelected:SetValue(false)
+                end
+            end)
+            return
+        end
+
+        local targetHrpNow = safeGetHRP(targetPlayer)
+        local _, myHrpNow = getCharacter(LocalPlayer)
+        if not myHrpNow or not targetHrpNow then
+            stopFollowing()
+            return
+        end
+
+        local goal = targetHrpNow.CFrame * CFrame.new(0, FOLLOW_HEIGHT, 0)
+        myHrpNow.CFrame = myHrpNow.CFrame:Lerp(goal, LERP_ALPHA)
+
+        setNoclipForCharacter(LocalPlayer.Character, true)
+        setAnchorHRP(LocalPlayer.Character, true)
+    end)
+end
+
+-- --- NOVO: FAST ATTACK LOGIC ---
+local FastAttackModule = {}
+
+local function SafeWaitForChild(parent, childName)
+    local success, result = pcall(function()
+        return parent:WaitForChild(childName, 5) -- Espera até 5s
+    end)
+    return result
+end
+
+local Modules = SafeWaitForChild(ReplicatedStorage, "Modules")
+local Net = Modules and SafeWaitForChild(Modules, "Net")
+
+-- Configs do FastAttack
+local FastAttackSettings = {
+    AutoClick = false,
+    ClickDelay = ATTACK_DELAY -- Usa o ATTACK_DELAY fixo
+}
+
+-- Implementação do FastAttack (simplificada/adaptada para usar a variável global)
+local FastAttack = {
+    Distance = 100,
+}
+
+local RegisterAttack = Net and SafeWaitForChild(Net, "RE/RegisterAttack")
+local RegisterHit = Net and SafeWaitForChild(Net, "RE/RegisterHit")
+
+local function IsAlive(character)
+    return character and character:FindFirstChild("Humanoid") and character.Humanoid.Health > 0
+end
+
+local function ProcessEnemies(OthersEnemies, Folder)
+    local BasePart = nil
+    for _, Enemy in ipairs(Folder:GetChildren()) do
+        local Head = Enemy:FindFirstChild("Head")
+        if Head and IsAlive(Enemy) and LocalPlayer:DistanceFromCharacter(Head.Position) < FastAttack.Distance then
+            if Enemy ~= LocalPlayer.Character then
+                table.insert(OthersEnemies, { Enemy, Head })
+                BasePart = Head
+            end
+        end
+    end
+    return BasePart
+end
+
+function FastAttack:Attack(BasePart, OthersEnemies)
+    if not BasePart or #OthersEnemies == 0 or not RegisterAttack or not RegisterHit then return end
+    pcall(function()
+        RegisterAttack:FireServer(FastAttackSettings.ClickDelay or 0)
+        RegisterHit:FireServer(BasePart, OthersEnemies)
+    end)
+end
+
+function FastAttack:AttackNearest()
+    local OthersEnemies = {}
+    local EnemiesFolder = workspace:FindFirstChild("Enemies")
+    local CharactersFolder = workspace:FindFirstChild("Characters")
+    local Part1 = nil
+    local Part2 = nil
+    if EnemiesFolder then Part1 = ProcessEnemies(OthersEnemies, EnemiesFolder) end
+    if CharactersFolder then Part2 = ProcessEnemies(OthersEnemies, CharactersFolder) end
+
+    local character = LocalPlayer.Character
+    if not character then return end
+    local equippedWeapon = character:FindFirstChildOfClass("Tool")
+
+    if equippedWeapon and equippedWeapon:FindFirstChild("LeftClickRemote") then
+        for _, enemyData in ipairs(OthersEnemies) do
+            local enemy = enemyData[1]
+            if enemy and enemy:FindFirstChild("HumanoidRootPart") and character:FindFirstChild("HumanoidRootPart") then
+                local direction = (enemy.HumanoidRootPart.Position - character:GetPivot().Position).Unit
+                pcall(function()
+                    equippedWeapon.LeftClickRemote:FireServer(direction, 1)
+                end)
+            end
+        end
+    elseif #OthersEnemies > 0 then
+        self:Attack(Part1 or Part2, OthersEnemies)
+    end
+end
+
+function FastAttack:BladeHits()
+    local Equipped = IsAlive(LocalPlayer.Character) and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+    if Equipped and Equipped.ToolTip ~= "Gun" then
+        self:AttackNearest()
+    end
+end
+
+-- Loop de Auto Attack controlado pela variável 'FastAttackSettings.AutoClick'
+task.spawn(function()
+    while true do
+        if FastAttackSettings.AutoClick then
+            FastAttack:BladeHits()
+            task.wait(FastAttackSettings.ClickDelay)
+        else
+            task.wait(0.1) -- Espera um pouco se estiver desligado
+        end
+    end
+end)
+-- --- FIM DO FAST ATTACK ---
+
+
+-- ====== UI BUILD (Fluent Beta style) ======
+local Window = Fluent:CreateWindow({
+    Title = "Night Mystic",
+    SubTitle = "By Mauro :3",
+    Search = true,
+    Icon = "home",
+    TabWidth = 160,
+    Size = UDim2.fromOffset(550, 460),
+    Acrylic = true,
+    Theme = "AMOLED",
+    MinimizeKey = Enum.KeyCode.LeftControl,
+
+    UserInfo = true,
+    UserInfoTop = false,
+    UserInfoTitle = LocalPlayer.DisplayName,
+    UserInfoSubtitle = "Follow Script",
+    UserInfoSubtitleColor = Color3.fromRGB(71, 123, 255)
+})
+
+local Tabs = {
+    Main = Window:AddTab({ Title = "Main", Icon = "sword" }),
+    Settings = Window:AddTab({ Title = "Settings", Icon = "settings" })
+}
+
+local Minimizer = Fluent:CreateMinimizer({
+  Icon = "home",
+  Size = UDim2.fromOffset(44, 44),
+  Position = UDim2.new(0, 320, 0, 24),
+  Acrylic = true,
+  Corner = 10,
+  Transparency = 1,
+  Draggable = true,
+  Visible = true
+})
+
+-- ====== Main Tab Controls ======
+do
+    local Section = Tabs.Main:AddSection("Auto Attack", "sword") -- Nova Seção para Auto Attack
+
+    -- NOVO TOGGLE: AUTO ATTACK
+    local autoAttackToggle = Tabs.Main:AddToggle("AutoAttack", { 
+        Title = "Auto Attack", 
+        Description = "Ativa o ataque automático (Fast Attack) para mobs/players. (Delay Fixo: 0.05s)", 
+        Default = false 
+    })
+    autoAttackToggle:OnChanged(function(value)
+        AUTO_ATTACK_ACTIVE = value -- Atualiza a variável de controle global
+        FastAttackSettings.AutoClick = value
+        if value then
+            Fluent:Notify({
+                Title = "Auto Attack Ativado",
+                Content = "O script agora tentará atacar o alvo mais próximo.",
+                Duration = 3
+            })
+        end
+    end)
+    
+    -- O SLIDER DE DELAY FOI REMOVIDO AQUI
+
+    local Section = Tabs.Main:AddSection("Follow", "users") -- Seção antiga de Follow
+
+    Tabs.Main:AddParagraph({
+        Icon = "home",
+        Title = "Hello",
+        Content = "Este Script foi Criado em Apenas 1 hora, então provavelmente Tem Vários Bugs."
+    })
+
+    local radiusSlider = Tabs.Main:AddSlider("NearestRadius", {
+        Title = "Raio p/ 'próximo' (studs)",
+        Description = "distance to kill nearby players.",
+        Default = NEAREST_RADIUS,
+        Min = 20,
+        Max = 1000,
+        Rounding = 1,
+        Callback = function(Value)
+            NEAREST_RADIUS = tonumber(Value) or 150
+        end
+    })
+    radiusSlider:OnChanged(function(Value) NEAREST_RADIUS = tonumber(Value) or 150 end)
+    radiusSlider:SetValue(NEAREST_RADIUS)
+
+    -- ====== Seguir jogador mais próximo ======
+    local nearestToggle = Tabs.Main:AddToggle("FollowNearest", { Title = "Kill Player Neastery", Default = false })
+    nearestToggle:OnChanged(function(value)
+        if value then
+            if Following.active then stopFollowing() end
+            NEAREST_RADIUS = tonumber(NEAREST_RADIUS) or 150
+            local nearest = findNearestPlayerWithinRadius(NEAREST_RADIUS)
+            if nearest then
+                Following.mode = "nearest"
+                followLoop(nearest)
+            else
+                Fluent:Notify({
+                    Title = "Nenhum player próximo",
+                    Content = "Nenhum player encontrado dentro de " .. tostring(NEAREST_RADIUS) .. " studs.",
+                    Duration = 4
+                })
+                pcall(function() Fluent.Options.FollowNearest:SetValue(false) end)
+            end
+        else
+            if Following.mode == "nearest" then stopFollowing() end
+        end
+    end)
+
+    -- ====== Dropdown e seguir jogador selecionado ======
+    local initialItems = {"Carregando..."}
+    local Dropdown = Tabs.Main:AddDropdown("TargetDropdown", {
+        Title = "Selecionar jogador",
+        Values = initialItems,
+        Multi = false,
+        Search = true,
+        Default = 1
+    })
+
+    local selectedName = nil
+    Dropdown:OnChanged(function(Value)
+        selectedName = Value
+    end)
+
+    local selectedToggle = Tabs.Main:AddToggle("FollowSelected", { Title = "Kill Player selected", Default = false })
+    selectedToggle:OnChanged(function(value)
+        if value then
+            if not selectedName then
+                Fluent:Notify({ Title = "Nenhuma seleção", Content = "Escolha um jogador na dropdown antes de ativar.", Duration = 3 })
+                pcall(function() Fluent.Options.FollowSelected:SetValue(false) end)
+                return
+            end
+            local target = nil
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p.Name == selectedName or p.DisplayName == selectedName then
+                    target = p
+                    break
+                end
+            end
+            if not target then
+                Fluent:Notify({ Title = "Jogador não encontrado", Content = "O jogador selecionado não está presente no servidor.", Duration = 3 })
+                pcall(function() Fluent.Options.FollowSelected:SetValue(false) end)
+                return
+            end
+            if Following.active then stopFollowing() end
+            Following.mode = "selected"
+            followLoop(target)
+        else
+            if Following.mode == "selected" then stopFollowing() end
+        end
+    end)
+
+    -- OS DOIS BOTÕES FORAM REMOVIDOS AQUI
+
+    -- ====== Atualiza dropdown ======
+    local function safeSetDropdownItems(dropObj, items)
+        if not dropObj then return false end
+        if not items or #items == 0 then items = {"Nenhum"} end
+
+        local function tryAll()
+            if dropObj.SetValues then dropObj:SetValues(items); return true end
+            if dropObj.SetItems then dropObj:SetItems(items); return true end
+            if dropObj.SetOptions then dropObj:SetOptions(items); return true end
+            if rawget(dropObj, "Values") ~= nil then dropObj.Values = items; return true end
+            if rawget(dropObj, "Options") ~= nil then dropObj.Options = items; return true end
+            if dropObj.SetValue and items[1] then dropObj:SetValue(items[1]); return true end
+            return false
+        end
+        local ok, res = pcall(tryAll)
+        return ok and res
+    end
+
+    local function rebuildDropdown()
+        local items = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer then table.insert(items, p.Name) end
+        end
+        if #items == 0 then items = {"Nenhum"} end
+        pcall(function() safeSetDropdownItems(Dropdown, items) end)
+
+        if selectedName then
+            local found = false
+            for _, n in ipairs(items) do
+                if n == selectedName then found = true break end
+            end
+            if not found then
+                selectedName = nil
+                pcall(function() if Dropdown.SetValue then Dropdown:SetValue(items[1]) end end)
+            end
+        end
+    end
+
+    task.spawn(function()
+        while true do
+            pcall(rebuildDropdown)
+            task.wait(DROPDOWN_UPDATE_DELAY)
+        end
+    end)
+
+    Players.PlayerAdded:Connect(function() pcall(rebuildDropdown) end)
+    Players.PlayerRemoving:Connect(function() pcall(rebuildDropdown) end)
+end
+
+-- ====== Settings (Save/Interface) ======
+SaveManager:SetLibrary(Fluent)
+InterfaceManager:SetLibrary(Fluent)
+
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({})
+
+InterfaceManager:SetFolder("FluentPlusScriptHub")
+SaveManager:SetFolder("FluentPlusScriptHub/config")
+
+InterfaceManager:BuildInterfaceSection(Tabs.Settings)
+SaveManager:BuildConfigSection(Tabs.Settings)
+
+Window:SelectTab(1)
+
+Fluent:Notify({
+    Title = "Night Mystic Carregado",
+    Content = ":3",
+    Duration = 3
+})
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+    task.wait(0.6)
+    if Following.active and Following.targetPlayer then
+        setNoclipForCharacter(char, true)
+        setAnchorHRP(char, true)
+    else
+        pcall(function()
+            local opt = Fluent.Options
+            if opt and opt.FollowNearest then opt.FollowNearest:SetValue(false) end
+            if opt and opt.FollowSelected then opt.FollowSelected:SetValue(false) end
+        end)
+    end
+end)
+
+print("FluentPlus Follow Script (COMPLETO, com Auto Attack) carregado. (Alterações: 2 botões e slider de delay removidos)")
